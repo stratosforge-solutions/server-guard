@@ -38,7 +38,7 @@ python guard_server.py --bind=192.168.88.101 --port=8875  --protected_uri=http:/
 
 ### Start a protected app
 
-Open up a terminal and start the handy [http=https-echo](https://github.com/mendhak/docker-http-https-echo) server which we'll consider as our protected app.  This is a nice test app as it echos the request object
+Open up a terminal and start the handy [http=https-echo](https://github.com/mendhak/docker-http-https-echo) server which we'll consider as our protected app.  This is a nice test app as it echos the request object (note tag 26 on pull)
 
 ```
 docker run -p 4080:8080 -p 4443:8443 --rm -t mendhak/http-https-echo:26
