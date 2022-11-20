@@ -6,6 +6,10 @@ The [guard_server.py](./guard_server.py) program will start a reverse proxy that
 It then checks the request using WAF logic provided by the `WAFLogic` class in [WAFLogic.py](./WAFLogic.py)
 Requests that pass the WAF check are forwarded to `protected_uri` which is the base URL for the protected application.
 
+## Warning
+
+This has not been tested for production usage and should only be used for research.
+
 ## Installation
 
 First time:
