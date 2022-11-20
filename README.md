@@ -38,7 +38,7 @@ python guard_server.py --bind=192.168.88.101 --port=8875  --protected_uri=http:/
 
 ### Start a protected app
 
-Open up a terminal and start the handy [http=https-echo](https://github.com/mendhak/docker-http-https-echo) server which we'll consider as our protected app.  This is a nice test app as it echos the request object (note tag 26 on pull)
+Open up a terminal and start the handy [http-https-echo](https://github.com/mendhak/docker-http-https-echo) server which we'll consider as our "protected application".  This is a nice test app as it echos the request object which is useful for debugging and tuning WAF rules (note tag 26 on pull)
 
 ```
 docker run -p 4080:8080 -p 4443:8443 --rm -t mendhak/http-https-echo:26
@@ -77,7 +77,7 @@ Now try connecting with a browser:
 http://192.168.88.105:8875
 ```
 
-You should be greated by some json showing the request.  
+You should be greeted by some json showing the request from the http-https-echo test app (our simulated protected app).  
 
 
 ```
@@ -123,7 +123,7 @@ Will respond:
 Forbidden!
 ```
 
-Now open a third windowm and try curling..the guard won't allow curl user agents.
+Now open a third window and try curling..the guard won't allow curl user agents.
 
 ```
 curl -X GET http://192.168.88.105:8875
