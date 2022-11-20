@@ -12,6 +12,8 @@ import sys
 import socket
 import asyncio
 
+from WAFLogic import WAFLogic
+
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
@@ -32,9 +34,7 @@ logger = logging.getLogger('tornado_proxy')
 
 __all__ = ['ProxyHandler', 'run_proxy']
 
-
-def fetch_request(request_url, **kwargs):    
-    logger.info("requested_url: {}".format(request_url))
+def fetch_request(request_url, **kwargs):        
     full_url = "{}{}".format(options.protected_uri, request_url)
     logger.info("full_url: {}".format(full_url))
     req = tornado.httpclient.HTTPRequest(full_url, **kwargs)
@@ -50,11 +50,11 @@ async def pipe(f: tornado.iostream.IOStream, t: tornado.iostream.IOStream):
     except tornado.iostream.StreamClosedError as e:
         pass
 
-
 class ProxyHandler(tornado.web.RequestHandler):
         
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.waf = WAFLogic()
         
     def compute_etag(self):
         return None  # disable tornado Etag
@@ -63,45 +63,53 @@ class ProxyHandler(tornado.web.RequestHandler):
         logger.info("GOT A GET REQUEST!")
         logger.info('Handle %s request to %s', self.request.method, self.request.uri)        
         logger.info('headers {}'.format(self.request.headers))
-        body = self.request.body
-        if not body:
-            body = None
-        try:
-            if 'Proxy-Connection' in self.request.headers:
-                del self.request.headers['Proxy-Connection']
-            response = await fetch_request(
-                self.request.uri,                
-                method="GET", body=body,
-                headers=self.request.headers, follow_redirects=False,
-                allow_nonstandard_methods=True)
-        except tornado.httpclient.HTTPError as e:
-            logger.error("Ooof we hit an error: {}".format(e))
-            if hasattr(e, 'response') and e.response:
-                pass
-            else:                
-                self.set_status(500)
-                self.write('Internal server error:\n' + str(e))
+        logger.info('Sending it to the WAF')
+
+        if self.waf.check_request(self.request):
+            #Passed WAF check
+            body = self.request.body
+            if not body:
+                body = None
+            try:
+                if 'Proxy-Connection' in self.request.headers:
+                    del self.request.headers['Proxy-Connection']
+                response = await fetch_request(
+                    self.request.uri,                
+                    method="GET", body=body,
+                    headers=self.request.headers, follow_redirects=False,
+                    allow_nonstandard_methods=True)
+            except tornado.httpclient.HTTPError as e:
+                logger.error("Ooof we hit an error: {}".format(e))
+                if hasattr(e, 'response') and e.response:
+                    pass
+                else:                
+                    self.set_status(500)
+                    self.write('Internal server error:\n' + str(e))
+                    return
+            except ConnectionRefusedError as e:
+                self.set_status(502)
+                self.write('Remote connection refused.')
                 return
-        except ConnectionRefusedError as e:
-            self.set_status(502)
-            self.write('Remote connection refused.')
-            return
 
-        if (response.error and not
-                isinstance(response.error, tornado.httpclient.HTTPError)):
-            self.set_status(500)
-            self.write('Internal server error:\n' + str(response.error))
+            if (response.error and not
+                    isinstance(response.error, tornado.httpclient.HTTPError)):
+                self.set_status(500)
+                self.write('Internal server error:\n' + str(response.error))
+            else:
+                self.set_status(response.code, response.reason)
+                self._headers = tornado.httputil.HTTPHeaders()  # clear tornado default header
+
+                for header, v in response.headers.get_all():
+                    if header not in ('Content-Length', 'Transfer-Encoding', 'Content-Encoding', 'Connection'):
+                        self.add_header(header, v)  # some header appear multiple times, eg 'Set-Cookie'
+
+                if response.body:
+                    self.set_header('Content-Length', len(response.body))
+                    self.write(response.body)
         else:
-            self.set_status(response.code, response.reason)
-            self._headers = tornado.httputil.HTTPHeaders()  # clear tornado default header
-
-            for header, v in response.headers.get_all():
-                if header not in ('Content-Length', 'Transfer-Encoding', 'Content-Encoding', 'Connection'):
-                    self.add_header(header, v)  # some header appear multiple times, eg 'Set-Cookie'
-
-            if response.body:
-                self.set_header('Content-Length', len(response.body))
-                self.write(response.body)
+            #Failed WAF check -- this is returned to the attack, so choose wisely!
+            self.set_status(403)
+            self.write('Forbidden!')
 
     async def post(self):
         logger.info("GOT A POST REQUEST!")
@@ -110,43 +118,48 @@ class ProxyHandler(tornado.web.RequestHandler):
         body = self.request.body
         if not body:
             body = None
-        try:
-            if 'Proxy-Connection' in self.request.headers:
-                del self.request.headers['Proxy-Connection']
-            response = await fetch_request(
-                self.request.uri,                
-                method="POST", body=body,
-                headers=self.request.headers, follow_redirects=False,
-                allow_nonstandard_methods=True)
-        except tornado.httpclient.HTTPError as e:
-            logger.error("Ooof we hit an error: {}".format(e))
-            if hasattr(e, 'response') and e.response:
-                pass
-            else:                
-                self.set_status(500)
-                self.write('Internal server error:\n' + str(e))
+        if self.waf.check_request(self.request):
+            #Passed WAF check
+            try:
+                if 'Proxy-Connection' in self.request.headers:
+                    del self.request.headers['Proxy-Connection']
+                response = await fetch_request(
+                    self.request.uri,                
+                    method="POST", body=body,
+                    headers=self.request.headers, follow_redirects=False,
+                    allow_nonstandard_methods=True)
+            except tornado.httpclient.HTTPError as e:
+                logger.error("Ooof we hit an error: {}".format(e))
+                if hasattr(e, 'response') and e.response:
+                    pass
+                else:                
+                    self.set_status(500)
+                    self.write('Internal server error:\n' + str(e))
+                    return
+            except ConnectionRefusedError as e:
+                self.set_status(502)
+                self.write('Remote connection refused.')
                 return
-        except ConnectionRefusedError as e:
-            self.set_status(502)
-            self.write('Remote connection refused.')
-            return
 
-        if (response.error and not
-                isinstance(response.error, tornado.httpclient.HTTPError)):
-            self.set_status(500)
-            self.write('Internal server error:\n' + str(response.error))
+            if (response.error and not
+                    isinstance(response.error, tornado.httpclient.HTTPError)):
+                self.set_status(500)
+                self.write('Internal server error:\n' + str(response.error))
+            else:
+                self.set_status(response.code, response.reason)
+                self._headers = tornado.httputil.HTTPHeaders()  # clear tornado default header
+
+                for header, v in response.headers.get_all():
+                    if header not in ('Content-Length', 'Transfer-Encoding', 'Content-Encoding', 'Connection'):
+                        self.add_header(header, v)  # some header appear multiple times, eg 'Set-Cookie'
+
+                if response.body:
+                    self.set_header('Content-Length', len(response.body))
+                    self.write(response.body)
         else:
-            self.set_status(response.code, response.reason)
-            self._headers = tornado.httputil.HTTPHeaders()  # clear tornado default header
-
-            for header, v in response.headers.get_all():
-                if header not in ('Content-Length', 'Transfer-Encoding', 'Content-Encoding', 'Connection'):
-                    self.add_header(header, v)  # some header appear multiple times, eg 'Set-Cookie'
-
-            if response.body:
-                self.set_header('Content-Length', len(response.body))
-                self.write(response.body)
-
+            #Failed WAF check -- this is returned to the attack, so choose wisely!
+            self.set_status(403)
+            self.write('Forbidden!')
 
 def run_proxy(port, address, start_ioloop=True):
     """

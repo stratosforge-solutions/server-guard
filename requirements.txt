@@ -1,2 +1,4 @@
 maproxy==0.0.12
 tornado==5.1.1
+pycurl==7.45.1
+tornado==6.2
