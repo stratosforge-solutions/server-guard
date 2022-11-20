@@ -1,9 +1,10 @@
 #!/usr/bin/env python
-
-
 #
-#  This code was copied from:  https://github.com/runapp/flexproxy
-#  And then modified.
+#  This code was original copied from:  https://github.com/runapp/flexproxy
+#  It was modified as follows:
+#
+#     - remove the concept of an addition upstream proxy (up_host, up_port);  We arent upstreaming
+#
 #
 import logging
 import os
@@ -24,26 +25,21 @@ from tornado.options import define, options
 
 define('port', default=8875, help='Port the proxy server runs on')
 define('bind', default='127.0.0.1', help='Address the proxy server binds to')
-define('up_host', default=None, type=str, help='Upstream proxy host')
-define('up_port', default=0, help='Upstream proxy port')
+define('protected_uri', default=None, type=str, help='Protected application uri')
+
 
 logger = logging.getLogger('tornado_proxy')
 
 __all__ = ['ProxyHandler', 'run_proxy']
 
 
-def fetch_request(url, up_proxy, **kwargs):
-    if up_proxy:
-        logger.info('Forward request via upstream proxy %s:%d', *up_proxy)
-        tornado.httpclient.AsyncHTTPClient.configure(
-            'tornado.curl_httpclient.CurlAsyncHTTPClient')
-        kwargs['proxy_host'] = up_proxy[0]
-        kwargs['proxy_port'] = up_proxy[1]
-    logger.info("url: {}".format(url))
-    req = tornado.httpclient.HTTPRequest(url, **kwargs)
+def fetch_request(request_url, **kwargs):    
+    logger.info("requested_url: {}".format(request_url))
+    full_url = "{}{}".format(options.protected_uri, request_url)
+    logger.info("full_url: {}".format(full_url))
+    req = tornado.httpclient.HTTPRequest(full_url, **kwargs)
     client = tornado.httpclient.AsyncHTTPClient(defaults=dict(request_timeout=180))
-    return client.fetch(req, raise_error=True)
-
+    return client.fetch(req, raise_error=False)
 
 async def pipe(f: tornado.iostream.IOStream, t: tornado.iostream.IOStream):
     try:
@@ -56,21 +52,16 @@ async def pipe(f: tornado.iostream.IOStream, t: tornado.iostream.IOStream):
 
 
 class ProxyHandler(tornado.web.RequestHandler):
-    SUPPORTED_METHODS = ['GET', 'POST', 'CONNECT']
-    proxy = None
-
+        
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        if options.up_host and options.up_port:
-            self.proxy = (options.up_host, options.up_port)
-            logger.info("Upstream proxy set to %s:%d", *self.proxy)
-
+        
     def compute_etag(self):
         return None  # disable tornado Etag
 
     async def get(self):
-        logger.info('Handle %s request to %s', self.request.method, self.request.uri)
-        logger.info('proxy {}'.format(self.proxy))
+        logger.info("GOT A GET REQUEST!")
+        logger.info('Handle %s request to %s', self.request.method, self.request.uri)        
         logger.info('headers {}'.format(self.request.headers))
         body = self.request.body
         if not body:
@@ -79,9 +70,8 @@ class ProxyHandler(tornado.web.RequestHandler):
             if 'Proxy-Connection' in self.request.headers:
                 del self.request.headers['Proxy-Connection']
             response = await fetch_request(
-                self.request.uri,
-                self.proxy,
-                method=self.request.method, body=body,
+                self.request.uri,                
+                method="GET", body=body,
                 headers=self.request.headers, follow_redirects=False,
                 allow_nonstandard_methods=True)
         except tornado.httpclient.HTTPError as e:
@@ -114,43 +104,48 @@ class ProxyHandler(tornado.web.RequestHandler):
                 self.write(response.body)
 
     async def post(self):
-        return self.get()
-
-    async def connect(self):
-        logger.info('Start CONNECT to %s', self.request.uri)
-        host, port = self.request.uri.split(':')  # Here the uri only contains "host:port" for CONNECT requests.
-        client: tornado.iostream.IOStream = self.request.connection.stream
-
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM, 0)
-        upstream = tornado.iostream.IOStream(s)
-
-        if self.proxy:
-            await upstream.connect(self.proxy)
-            # It's safe to encode as ascii, as non-ascii domains are already encoded.
-            await upstream.write(b'CONNECT %s HTTP/1.1\r\n' % self.request.uri.encode('ascii'))
-            await upstream.write(b'Host: %s\r\n' % host.encode('ascii'))
-            await upstream.write(b'Proxy-Connection: Keep-Alive\r\n\r\n')
-            data = await upstream.read_until(b'\r\n\r\n')
-            if data:
-                first_line = data.splitlines()[0]
-                _, status, _ = first_line.split(None, 2)
-                status = int(status)
-            else:
-                status = -1
-            if status != 200:
-                self.set_status(status)
-                return
-
-            logger.info('Connected to upstream proxy %s:%d', *self.proxy)
-        else:
-            await upstream.connect((host, int(port)))
-
-        logger.info('CONNECT tunnel established to %s', self.request.uri)
+        logger.info("GOT A POST REQUEST!")
+        logger.info('Handle %s request to %s', self.request.method, self.request.uri)        
+        logger.info('headers {}'.format(self.request.headers))
+        body = self.request.body
+        if not body:
+            body = None
         try:
-            await client.write(b'HTTP/1.0 200 Connection established\r\n\r\n')
-        except tornado.iostream.StreamClosedError as e:
+            if 'Proxy-Connection' in self.request.headers:
+                del self.request.headers['Proxy-Connection']
+            response = await fetch_request(
+                self.request.uri,                
+                method="POST", body=body,
+                headers=self.request.headers, follow_redirects=False,
+                allow_nonstandard_methods=True)
+        except tornado.httpclient.HTTPError as e:
+            logger.error("Ooof we hit an error: {}".format(e))
+            if hasattr(e, 'response') and e.response:
+                pass
+            else:                
+                self.set_status(500)
+                self.write('Internal server error:\n' + str(e))
+                return
+        except ConnectionRefusedError as e:
+            self.set_status(502)
+            self.write('Remote connection refused.')
             return
-        await asyncio.gather(pipe(upstream, client), pipe(client, upstream))
+
+        if (response.error and not
+                isinstance(response.error, tornado.httpclient.HTTPError)):
+            self.set_status(500)
+            self.write('Internal server error:\n' + str(response.error))
+        else:
+            self.set_status(response.code, response.reason)
+            self._headers = tornado.httputil.HTTPHeaders()  # clear tornado default header
+
+            for header, v in response.headers.get_all():
+                if header not in ('Content-Length', 'Transfer-Encoding', 'Content-Encoding', 'Connection'):
+                    self.add_header(header, v)  # some header appear multiple times, eg 'Set-Cookie'
+
+            if response.body:
+                self.set_header('Content-Length', len(response.body))
+                self.write(response.body)
 
 
 def run_proxy(port, address, start_ioloop=True):
@@ -169,4 +164,8 @@ def run_proxy(port, address, start_ioloop=True):
 
 if __name__ == '__main__':
     options.parse_command_line()
+    if options.protected_uri is None:
+        logger.error("You did not pass in a --protected_uri argument; e.g. --protected_uri=http://10.0.0.1:3000")
+        exit()
+
     run_proxy(options.port, options.bind)
