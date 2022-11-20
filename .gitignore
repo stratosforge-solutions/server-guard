@@ -1,1 +1,3 @@
 ve-guard/
+*.pyc
+__pycache__
