@@ -1,0 +1,2 @@
+maproxy==0.0.12
+tornado==5.1.1
